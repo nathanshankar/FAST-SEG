@@ -17,6 +17,9 @@ find_package(pcl_conversions REQUIRED)
 find_package(tf2 REQUIRED)
 find_package(tf2_ros REQUIRED)
 find_package(tf2_geometry_msgs REQUIRED) # For tf2::toMsg
+find_package(tf2_eigen REQUIRED) # For tf2::eigenToMsg
+find_package(pcl_ros REQUIRED) 
+find_package(cv_bridge REQUIRED)
 
 # For Eigen
 find_package(Eigen3 CONFIG REQUIRED)
@@ -27,7 +30,7 @@ find_package(rosidl_default_generators REQUIRED)
 rosidl_generate_interfaces(my_cluster_odom
   "msg/Cluster.msg"
   "msg/ClusterArray.msg"
-  DEPENDENCIES std_msgs geometry_msgs
+  DEPENDENCIES std_msgs geometry_msgs 
 )
 
 add_executable(dbscan_clusterer_node src/dbscan_clusterer_node.cpp)
@@ -41,12 +44,12 @@ install(TARGETS icp_odom_node
 )
 
 ament_target_dependencies(dbscan_clusterer_node
-  rclcpp sensor_msgs visualization_msgs pcl_conversions Eigen3
+  rclcpp sensor_msgs visualization_msgs pcl_conversions Eigen3 tf2_ros tf2_geometry_msgs tf2_eigen pcl_ros nav_msgs cv_bridge
   rosidl_default_runtime # Add this line
   # Also, add your custom message package here if it's external, but if it's in the same package, it's implicitly handled.
 )
 ament_target_dependencies(icp_odom_node
-  rclcpp nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs Eigen3
+  rclcpp nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs Eigen3 sensor_msgs
   rosidl_default_runtime # Add this line
 )
 
@@ -56,6 +59,11 @@ target_link_libraries(dbscan_clusterer_node
 )
 target_link_libraries(icp_odom_node
   my_cluster_odom__rosidl_typesupport_cpp # Link to the generated message library
+)
+
+install(PROGRAMS
+  src/disparity_cluster_node.py
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)

@@ -13,7 +13,7 @@
 #include <limits>
 #include <random>
 #include <chrono>
-#include <algorithm>
+#include <algorithm> // For std::max, std::min
 #include <cmath>
 
 // For Kalman Filter
@@ -29,23 +29,25 @@ public:
     DBSCANNode() : Node("dbscan_node")
     {
         // Declare parameters for DBSCAN and tracking
-        this->declare_parameter<float>("dbscan_eps", 0.25f);
+        this->declare_parameter<double>("dbscan_eps", 0.20); // Changed to double
         this->declare_parameter<int>("dbscan_min_pts", 10);
         this->declare_parameter<int>("n_stable_frames", 3);
         this->declare_parameter<int>("n_missed_frames", 20); // Frames before a track is moved to "lost" pool
-        this->declare_parameter<int>("max_lost_frames", 100); // Frames before a track is permanently forgotten
+        this->declare_parameter<int>("max_lost_frames", 200); // Example: keeps tracks in memory for longer
 
-        this->declare_parameter<float>("active_track_match_distance_threshold", 1.5f); // For active tracks
-        this->declare_parameter<float>("lost_track_position_threshold", 5.0f); // More lenient for re-identification position
-        this->declare_parameter<float>("lost_track_dimension_threshold", 1.0f); // Max total (dx+dy+dz) difference for re-identification
-        this->declare_parameter<float>("reid_position_weight", 1.0f); // Weight for position in re-id score
-        this->declare_parameter<float>("reid_dimension_weight", 0.5f); // Weight for dimension in re-id score
+        this->declare_parameter<double>("active_track_match_distance_threshold", 1.5); // Changed to double
+        this->declare_parameter<double>("lost_track_position_threshold", 7.5); // Changed to double
+        this->declare_parameter<double>("lost_track_dimension_threshold", 1.5); // Changed to double
+        this->declare_parameter<double>("reid_position_weight", 1.0); // Changed to double
+        this->declare_parameter<double>("reid_dimension_weight", 0.5); // Changed to double
 
-        this->declare_parameter<float>("kalman_pos_noise_q", 0.1f);
-        this->declare_parameter<float>("kalman_vel_noise_q", 2.0f);
-        this->declare_parameter<float>("kalman_measurement_noise_r", 0.02f);
+        this->declare_parameter<double>("kalman_pos_noise_q", 0.1); // Changed to double
+        this->declare_parameter<double>("kalman_vel_noise_q", 2.0); // Changed to double
+        this->declare_parameter<double>("kalman_min_vel_noise_q", 0.05); // NEW PARAMETER, Changed to double
+        this->declare_parameter<double>("kalman_vel_noise_q_decay_factor", 0.9); // NEW PARAMETER, Changed to double
+        this->declare_parameter<double>("kalman_measurement_noise_r", 0.02); // Changed to double
 
-        // Get parameters
+        // Get parameters (all using as_double() now)
         dbscan_eps_ = this->get_parameter("dbscan_eps").as_double();
         dbscan_min_pts_ = this->get_parameter("dbscan_min_pts").as_int();
         n_stable_frames_ = this->get_parameter("n_stable_frames").as_int();
@@ -60,6 +62,8 @@ public:
 
         kalman_pos_noise_q_ = this->get_parameter("kalman_pos_noise_q").as_double();
         kalman_vel_noise_q_ = this->get_parameter("kalman_vel_noise_q").as_double();
+        kalman_min_vel_noise_q_ = this->get_parameter("kalman_min_vel_noise_q").as_double(); // Get new parameter
+        kalman_vel_noise_q_decay_factor_ = this->get_parameter("kalman_vel_noise_q_decay_factor").as_double(); // Get new parameter
         kalman_measurement_noise_r_ = this->get_parameter("kalman_measurement_noise_r").as_double();
 
         // Subscribers and Publishers
@@ -72,11 +76,8 @@ public:
 
         rand_gen_.seed(std::chrono::system_clock::now().time_since_epoch().count());
 
-        // Initialize Kalman filter matrices (constant parts)
-        Q_ = Eigen::MatrixXd::Identity(6, 6);
-        Q_.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * kalman_pos_noise_q_; // Position noise
-        Q_.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * kalman_vel_noise_q_; // Velocity noise (more impactful for drift)
-
+        // Initialize constant Kalman filter matrices
+        // R_ and H_ remain constant as they represent measurement model
         R_ = Eigen::MatrixXd::Identity(3, 3) * kalman_measurement_noise_r_; // Measurement noise
 
         H_ = Eigen::MatrixXd::Zero(3, 6);
@@ -89,47 +90,54 @@ public:
         RCLCPP_INFO(this->get_logger(), "Tracking: N_STABLE_FRAMES=%d, N_MISSED_FRAMES=%d, MAX_LOST_FRAMES=%d", n_stable_frames_, n_missed_frames_, max_lost_frames_);
         RCLCPP_INFO(this->get_logger(), "Matching: Active_Dist=%.2f, Lost_Pos_Dist=%.2f, Lost_Dim_Diff=%.2f", active_track_match_distance_threshold_, lost_track_position_threshold_, lost_track_dimension_threshold_);
         RCLCPP_INFO(this->get_logger(), "Re-ID Weights: Pos=%.2f, Dim=%.2f", reid_position_weight_, reid_dimension_weight_);
+        RCLCPP_INFO(this->get_logger(), "Kalman Filter (Adaptive Vel Noise): Pos_Q=%.2f, Initial_Vel_Q=%.2f, Min_Vel_Q=%.2f, Decay_Factor=%.2f, Meas_R=%.2f", 
+                    kalman_pos_noise_q_, kalman_vel_noise_q_, kalman_min_vel_noise_q_, kalman_vel_noise_q_decay_factor_, kalman_measurement_noise_r_);
     }
 
 private:
     // Internal structure to hold cluster memory, including Kalman filter state
     struct ClusterMemory {
-        Eigen::Vector3f centroid;
+        Eigen::Vector3f centroid; // This will store the Kalman-filtered centroid
         std_msgs::msg::ColorRGBA color;
         int id;
         int frame_count;
         int missed_count;
-        Eigen::Vector4f min_bounds; // Store min/max for better matching/tracking
-        Eigen::Vector4f max_bounds;
+        Eigen::Vector4f min_bounds; // Store min/max for better matching/tracking (from measurement)
+        Eigen::Vector4f max_bounds; // Store min/max for better matching/tracking (from measurement)
 
         Eigen::VectorXd x_k; // Kalman filter state: [px, py, pz, vx, vy, vz]'
         Eigen::MatrixXd P_k; // Kalman filter covariance
         rclcpp::Time last_update_time;
+        
+        // Adaptive Kalman Filter parameter for this specific track
+        double current_kalman_vel_noise_q; // Per-track adaptive velocity noise
     };
 
     int cluster_id_counter_ = 0;
 
-    // Parameters
-    float dbscan_eps_;
+    // Parameters (all changed to double)
+    double dbscan_eps_;
     int dbscan_min_pts_;
     int n_stable_frames_;
     int n_missed_frames_;
     int max_lost_frames_;
-    float active_track_match_distance_threshold_;
-    float lost_track_position_threshold_;
-    float lost_track_dimension_threshold_;
-    float reid_position_weight_;
-    float reid_dimension_weight_;
-    float kalman_pos_noise_q_;
-    float kalman_vel_noise_q_;
-    float kalman_measurement_noise_r_;
+    double active_track_match_distance_threshold_;
+    double lost_track_position_threshold_;
+    double lost_track_dimension_threshold_;
+    double reid_position_weight_;
+    double reid_dimension_weight_;
+    double kalman_pos_noise_q_;
+    double kalman_vel_noise_q_; // Initial/Max value
+    double kalman_min_vel_noise_q_; // NEW
+    double kalman_vel_noise_q_decay_factor_; // NEW
+    double kalman_measurement_noise_r_;
 
     std::vector<ClusterMemory> previous_clusters_; // Active tracks
     std::vector<ClusterMemory> recently_lost_clusters_; // Tracks that were missed, but not yet forgotten
 
     std::default_random_engine rand_gen_;
 
-    Eigen::MatrixXd Q_; // Process noise covariance
+    // Q_ is now dynamic, R_ and H_ are constant
     Eigen::MatrixXd R_; // Measurement noise covariance
     Eigen::MatrixXd H_; // Measurement matrix
 
@@ -154,6 +162,7 @@ private:
         cluster_mem.P_k.block<3,3>(3,3) = Eigen::Matrix3d::Identity() * 10.0; // Initial velocity uncertainty (high, because we don't know it)
 
         cluster_mem.last_update_time = current_time;
+        cluster_mem.current_kalman_vel_noise_q = kalman_vel_noise_q_; // Initialize with max noise
     }
 
     /**
@@ -175,12 +184,19 @@ private:
              0, 0, 0, 0, 1, 0,
              0, 0, 0, 0, 0, 1;
 
+        // --- ADAPTIVE Q MATRIX ---
+        // Create Q matrix dynamically for this specific track based on its current velocity noise
+        Eigen::MatrixXd current_Q = Eigen::MatrixXd::Identity(6, 6);
+        current_Q.block<3, 3>(0, 0) = Eigen::Matrix3d::Identity() * kalman_pos_noise_q_; // Position noise (constant)
+        current_Q.block<3, 3>(3, 3) = Eigen::Matrix3d::Identity() * cluster_mem.current_kalman_vel_noise_q; // Adaptive Velocity noise
+
         cluster_mem.x_k = F * cluster_mem.x_k; // Predict state
-        cluster_mem.P_k = F * cluster_mem.P_k * F.transpose() + Q_; // Predict covariance
+        cluster_mem.P_k = F * cluster_mem.P_k * F.transpose() + current_Q; // Predict covariance
     }
 
     /**
      * @brief Updates the Kalman filter with a new measurement.
+     * Also updates the adaptive process noise for velocity.
      * @param cluster_mem The ClusterMemory struct to update.
      * @param measurement The new measured position.
      * @param current_time The current time.
@@ -199,15 +215,21 @@ private:
         cluster_mem.P_k = (I - K * H_) * cluster_mem.P_k; // Update covariance estimate
 
         cluster_mem.last_update_time = current_time;
-    }
 
+        // --- ADAPTIVE VELOCITY NOISE DECAY ---
+        // When a track is updated (i.e., matched), reduce its velocity process noise
+        // Ensure both arguments to std::max are of the same type (double)
+        cluster_mem.current_kalman_vel_noise_q = std::max(kalman_min_vel_noise_q_,
+                                                          cluster_mem.current_kalman_vel_noise_q * kalman_vel_noise_q_decay_factor_);
+    }
+    
     /**
      * @brief Callback function for incoming point cloud messages.
      * Performs filtering, DBSCAN clustering, and cluster tracking.
      * @param msg The shared pointer to the incoming PointCloud2 message.
      */
     void pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr msg)
-    {   auto start_filter_downsample = this->now();
+    {   
         pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>());
         pcl::fromROSMsg(*msg, *cloud);
 
@@ -235,7 +257,7 @@ private:
         pcl::PassThrough<pcl::PointXYZ> pass_y;
         pass_y.setInputCloud(cloud);
         pass_y.setFilterFieldName("y");
-        pass_y.setFilterLimits(ceiling_y + 0.05, ground_y - 0.05); // Small margin to avoid cutting off objects at boundary
+        pass_y.setFilterLimits(ceiling_y + 0.25f, ground_y - 0.05f); // Small margin to avoid cutting off objects at boundary
         pass_y.filter(*filtered_cloud);
 
         if (filtered_cloud->empty())
@@ -301,23 +323,10 @@ private:
             RCLCPP_WARN(this->get_logger(), "Point cloud empty after voxel grid downsampling.");
             return;
         }
-        auto end_filter_downsample = this->now();
-        RCLCPP_INFO(this->get_logger(), "Filtering and downsampling took %f seconds.", (end_filter_downsample - start_filter_downsample).seconds());
 
-        auto start_clustering = this->now();
-        std::vector<std::vector<int>> clusters = dbscanClustering(filtered_cloud, dbscan_eps_, dbscan_min_pts_);
-        auto end_clustering = this->now();
-        RCLCPP_INFO(this->get_logger(), "DBSCAN clustering took %f seconds.", (end_clustering - start_clustering).seconds());
-
-        auto start_refinement = this->now();
+        std::vector<std::vector<int>> clusters = dbscanClustering(filtered_cloud, static_cast<float>(dbscan_eps_), dbscan_min_pts_); // Cast eps to float
         std::vector<std::vector<int>> refined_clusters = refineClusters(filtered_cloud, clusters);
-        auto end_refinement = this->now();
-        RCLCPP_INFO(this->get_logger(), "Cluster refinement took %f seconds.", (end_refinement - start_refinement).seconds());
-
-        auto start_publish = this->now();
         processAndPublishClusters(msg->header.frame_id, filtered_cloud, refined_clusters);
-        auto end_publish = this->now();
-        RCLCPP_INFO(this->get_logger(), "Publishing clusters took %f seconds.", (end_publish - start_publish).seconds());
     }
 
     /**
@@ -384,7 +393,7 @@ private:
                     continue;
                 }
 
-                float new_eps = dbscan_eps_ / 2.0f; // Use a smaller epsilon for sub-clustering
+                float new_eps = static_cast<float>(dbscan_eps_) / 2.0f; // Use a smaller epsilon for sub-clustering
                 auto sub_clusters = dbscanClustering(sub_cloud, new_eps, dbscan_min_pts_);
 
                 // Map indices back to original cloud
@@ -487,7 +496,7 @@ private:
             std::vector<float> distances;
             tree->radiusSearch(cloud->points[i], eps, neighbors, distances);
 
-            if (neighbors.size() < minPts)
+            if (neighbors.size() < static_cast<size_t>(minPts)) // Cast minPts to size_t
             {
                 visited[i] = true; // Mark as visited, but it's a noise point (cluster_labels[i] remains -1)
                 continue;
@@ -518,7 +527,7 @@ private:
                         std::vector<int> new_neighbors;
                         std::vector<float> new_distances;
                         tree->radiusSearch(cloud->points[idx], eps, new_neighbors, new_distances);
-                        if (new_neighbors.size() >= minPts) {
+                        if (new_neighbors.size() >= static_cast<size_t>(minPts)) { // Cast minPts to size_t
                             // If it's a core point, add its neighbors to the queue
                             neighbor_queue.push(idx);
                         }
@@ -548,8 +557,9 @@ private:
         color.b = dist(rand_gen_);
         // Ensure some minimum brightness to be visible
         if (color.r + color.g + color.b < 0.8) {
-            float max_val = std::max({color.r, color.g, color.b});
-            float scale_factor = 0.8 / (color.r + color.g + color.b);
+            float sum_rgb = color.r + color.g + color.b;
+            if (sum_rgb < 1e-6f) sum_rgb = 1e-6f; // Avoid division by zero
+            float scale_factor = 0.8f / sum_rgb; // Cast 0.8 to float
             color.r *= scale_factor;
             color.g *= scale_factor;
             color.b *= scale_factor;
@@ -627,12 +637,12 @@ private:
 
         for (size_t i = 0; i < clusters.size(); ++i)
         {
-            if (clusters[i].empty() || clusters[i].size() < dbscan_min_pts_) continue; // Only consider valid clusters
+            if (clusters[i].empty() || clusters[i].size() < static_cast<size_t>(dbscan_min_pts_)) continue; // Only consider valid clusters
 
             Eigen::Vector3f current_centroid = computeCentroid(cloud, clusters[i]);
 
             int best_matched_prev_idx = -1;
-            float min_dist = std::numeric_limits<float>::max();
+            double min_dist = std::numeric_limits<double>::max(); // Use double for comparison
 
             for (size_t j = 0; j < previous_clusters_.size(); ++j)
             {
@@ -640,11 +650,11 @@ private:
                     continue; // This previous track has already been assigned
                 }
 
-                Eigen::Vector3f predicted_centroid_prev(previous_clusters_[j].x_k(0),
-                                                        previous_clusters_[j].x_k(1),
-                                                        previous_clusters_[j].x_k(2));
+                Eigen::Vector3f predicted_centroid_prev(static_cast<float>(previous_clusters_[j].x_k(0)), // Cast to float for Eigen::Vector3f
+                                                        static_cast<float>(previous_clusters_[j].x_k(1)),
+                                                        static_cast<float>(previous_clusters_[j].x_k(2)));
 
-                float dist = (current_centroid - predicted_centroid_prev).norm();
+                double dist = (current_centroid - predicted_centroid_prev).norm(); // Calculation result will be float, promote for comparison
 
                 if (dist < min_dist && dist < active_track_match_distance_threshold_)
                 {
@@ -667,18 +677,18 @@ private:
 
         for (size_t i = 0; i < clusters.size(); ++i)
         {
-            if (current_cluster_matched[i] || clusters[i].empty() || clusters[i].size() < dbscan_min_pts_) continue; // Skip if already matched or too small
+            if (current_cluster_matched[i] || clusters[i].empty() || clusters[i].size() < static_cast<size_t>(dbscan_min_pts_)) continue; // Skip if already matched or too small
 
             Eigen::Vector3f current_centroid = computeCentroid(cloud, clusters[i]);
             Eigen::Vector4f min_pt_current, max_pt_current;
             pcl::getMinMax3D(*cloud, clusters[i], min_pt_current, max_pt_current);
 
-            float current_dx = max_pt_current.x() - min_pt_current.x();
-            float current_dy = max_pt_current.y() - min_pt_current.y();
-            float current_dz = max_pt_current.z() - min_pt_current.z();
+            double current_dx = static_cast<double>(max_pt_current.x() - min_pt_current.x());
+            double current_dy = static_cast<double>(max_pt_current.y() - min_pt_current.y());
+            double current_dz = static_cast<double>(max_pt_current.z() - min_pt_current.z());
 
             int best_reidentified_lost_idx = -1;
-            float min_combined_score = std::numeric_limits<float>::max(); // Use a combined score for best match
+            double min_combined_score = std::numeric_limits<double>::max(); // Use a combined score for best match
 
             for (size_t j = 0; j < recently_lost_clusters_.size(); ++j)
             {
@@ -687,17 +697,17 @@ private:
                 }
                 
                 // --- Positional Check ---
-                Eigen::Vector3f predicted_centroid_lost(recently_lost_clusters_[j].x_k(0),
-                                                        recently_lost_clusters_[j].x_k(1),
-                                                        recently_lost_clusters_[j].x_k(2));
-                float position_dist = (current_centroid - predicted_centroid_lost).norm();
+                Eigen::Vector3f predicted_centroid_lost(static_cast<float>(recently_lost_clusters_[j].x_k(0)),
+                                                        static_cast<float>(recently_lost_clusters_[j].x_k(1)),
+                                                        static_cast<float>(recently_lost_clusters_[j].x_k(2)));
+                double position_dist = (current_centroid - predicted_centroid_lost).norm();
 
                 // --- Dimension/Size Check ---
-                float lost_dx = recently_lost_clusters_[j].max_bounds.x() - recently_lost_clusters_[j].min_bounds.x();
-                float lost_dy = recently_lost_clusters_[j].max_bounds.y() - recently_lost_clusters_[j].min_bounds.y();
-                float lost_dz = recently_lost_clusters_[j].max_bounds.z() - recently_lost_clusters_[j].min_bounds.z();
+                double lost_dx = static_cast<double>(recently_lost_clusters_[j].max_bounds.x() - recently_lost_clusters_[j].min_bounds.x());
+                double lost_dy = static_cast<double>(recently_lost_clusters_[j].max_bounds.y() - recently_lost_clusters_[j].min_bounds.y());
+                double lost_dz = static_cast<double>(recently_lost_clusters_[j].max_bounds.z() - recently_lost_clusters_[j].min_bounds.z());
 
-                float dimension_diff = std::abs(current_dx - lost_dx) +
+                double dimension_diff = std::abs(current_dx - lost_dx) +
                                        std::abs(current_dy - lost_dy) +
                                        std::abs(current_dz - lost_dz);
 
@@ -722,7 +732,7 @@ private:
                 }
 
                 // --- Combine Scores (Weighted sum, configurable via parameters) ---
-                float combined_score = (position_dist * reid_position_weight_) + (dimension_diff * reid_dimension_weight_); 
+                double combined_score = (position_dist * reid_position_weight_) + (dimension_diff * reid_dimension_weight_); 
 
                 if (combined_score < min_combined_score) {
                     min_combined_score = combined_score;
@@ -757,13 +767,19 @@ private:
             pcl::getMinMax3D(*cloud, clusters[current_idx], min_pt, max_pt);
 
             ClusterMemory updated_mem = previous_clusters_[prev_idx];
-            updated_mem.centroid = current_centroid; // Update centroid to current measurement
             updated_mem.min_bounds = min_pt; // Update bounds to current measurement
             updated_mem.max_bounds = max_pt;
             updated_mem.frame_count++;
             updated_mem.missed_count = 0; // Reset missed count
 
             updateKalmanFilter(updated_mem, current_centroid, current_frame_time);
+            
+            // --- MODIFICATION: Use Kalman-filtered position for centroid ---
+            updated_mem.centroid.x() = static_cast<float>(updated_mem.x_k(0));
+            updated_mem.centroid.y() = static_cast<float>(updated_mem.x_k(1));
+            updated_mem.centroid.z() = static_cast<float>(updated_mem.x_k(2));
+            // --- END MODIFICATION ---
+
             next_previous_clusters_state.push_back(updated_mem);
 
             // Publish markers for stable, active tracks
@@ -795,9 +811,11 @@ private:
                 bbox_marker.id = updated_mem.id;
                 bbox_marker.type = visualization_msgs::msg::Marker::CUBE;
                 bbox_marker.action = visualization_msgs::msg::Marker::ADD;
-                bbox_marker.pose.position.x = (min_pt.x() + max_pt.x()) / 2.0f;
-                bbox_marker.pose.position.y = (min_pt.y() + max_pt.y()) / 2.0f;
-                bbox_marker.pose.position.z = (min_pt.z() + max_pt.z()) / 2.0f;
+                // --- MODIFICATION: Use Kalman-filtered position for bounding box center ---
+                bbox_marker.pose.position.x = static_cast<float>(updated_mem.x_k(0));
+                bbox_marker.pose.position.y = static_cast<float>(updated_mem.x_k(1));
+                bbox_marker.pose.position.z = static_cast<float>(updated_mem.x_k(2));
+                // --- END MODIFICATION ---
                 bbox_marker.scale.x = std::max(0.01f, max_pt.x() - min_pt.x());
                 bbox_marker.scale.y = std::max(0.01f, max_pt.y() - min_pt.y());
                 bbox_marker.scale.z = std::max(0.01f, max_pt.z() - min_pt.z());
@@ -812,9 +830,11 @@ private:
                 text_marker.id = updated_mem.id;
                 text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
                 text_marker.action = visualization_msgs::msg::Marker::ADD;
-                text_marker.pose.position.x = updated_mem.centroid.x();
-                text_marker.pose.position.y = updated_mem.centroid.y();
-                text_marker.pose.position.z = max_pt.z() + 0.1f; // Place text above the bounding box
+                // --- MODIFICATION: Use Kalman-filtered position for text marker ---
+                text_marker.pose.position.x = static_cast<float>(updated_mem.x_k(0));
+                text_marker.pose.position.y = static_cast<float>(updated_mem.x_k(1));
+                text_marker.pose.position.z = static_cast<float>(updated_mem.x_k(2)) + 0.1f; // Place text slightly above filtered position
+                // --- END MODIFICATION ---
                 text_marker.scale.z = 0.1; // Text height
                 text_marker.color = updated_mem.color;
                 text_marker.color.a = 1.0f;
@@ -836,13 +856,19 @@ private:
             pcl::getMinMax3D(*cloud, clusters[current_idx], min_pt, max_pt);
 
             ClusterMemory reidentified_mem = recently_lost_clusters_[lost_idx];
-            reidentified_mem.centroid = current_centroid; // Update centroid to current measurement
             reidentified_mem.min_bounds = min_pt; // Update bounds to current measurement
             reidentified_mem.max_bounds = max_pt;
             reidentified_mem.frame_count++; // Continue frame count
             reidentified_mem.missed_count = 0; // Reset missed count
 
             updateKalmanFilter(reidentified_mem, current_centroid, current_frame_time);
+            
+            // --- MODIFICATION: Use Kalman-filtered position for centroid ---
+            reidentified_mem.centroid.x() = static_cast<float>(reidentified_mem.x_k(0));
+            reidentified_mem.centroid.y() = static_cast<float>(reidentified_mem.x_k(1));
+            reidentified_mem.centroid.z() = static_cast<float>(reidentified_mem.x_k(2));
+            // --- END MODIFICATION ---
+
             next_previous_clusters_state.push_back(reidentified_mem); // Add back to active tracks
 
             RCLCPP_INFO(this->get_logger(), "Track %d RE-IDENTIFIED (current frame count: %d).", reidentified_mem.id, reidentified_mem.frame_count);
@@ -876,9 +902,11 @@ private:
                 bbox_marker.id = reidentified_mem.id;
                 bbox_marker.type = visualization_msgs::msg::Marker::CUBE;
                 bbox_marker.action = visualization_msgs::msg::Marker::ADD;
-                bbox_marker.pose.position.x = (min_pt.x() + max_pt.x()) / 2.0f;
-                bbox_marker.pose.position.y = (min_pt.y() + max_pt.y()) / 2.0f;
-                bbox_marker.pose.position.z = (min_pt.z() + max_pt.z()) / 2.0f;
+                // --- MODIFICATION: Use Kalman-filtered position for bounding box center ---
+                bbox_marker.pose.position.x = static_cast<float>(reidentified_mem.x_k(0));
+                bbox_marker.pose.position.y = static_cast<float>(reidentified_mem.x_k(1));
+                bbox_marker.pose.position.z = static_cast<float>(reidentified_mem.x_k(2));
+                // --- END MODIFICATION ---
                 bbox_marker.scale.x = std::max(0.01f, max_pt.x() - min_pt.x());
                 bbox_marker.scale.y = std::max(0.01f, max_pt.y() - min_pt.y());
                 bbox_marker.scale.z = std::max(0.01f, max_pt.z() - min_pt.z());
@@ -894,9 +922,9 @@ private:
                 text_marker.id = reidentified_mem.id;
                 text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
                 text_marker.action = visualization_msgs::msg::Marker::ADD;
-                text_marker.pose.position.x = reidentified_mem.centroid.x();
-                text_marker.pose.position.y = reidentified_mem.centroid.y();
-                text_marker.pose.position.z = max_pt.z() + 0.1f;
+                text_marker.pose.position.x = static_cast<float>(reidentified_mem.x_k(0)); // Cast Kalman state to float for ROS msg
+                text_marker.pose.position.y = static_cast<float>(reidentified_mem.x_k(1));
+                text_marker.pose.position.z = static_cast<float>(reidentified_mem.x_k(2)) + 0.1f;
                 text_marker.scale.z = 0.1;
                 text_marker.color = reidentified_mem.color;
                 text_marker.color.a = 1.0f;
@@ -910,14 +938,13 @@ private:
         // Process new clusters (unmatched current clusters after active and lost checks)
         for (size_t i = 0; i < clusters.size(); ++i)
         {
-            if (!current_cluster_matched[i] && clusters[i].size() >= dbscan_min_pts_) // Only consider new, valid clusters
+            if (!current_cluster_matched[i] && clusters[i].size() >= static_cast<size_t>(dbscan_min_pts_)) // Only consider new, valid clusters
             {
                 Eigen::Vector3f current_centroid = computeCentroid(cloud, clusters[i]);
                 Eigen::Vector4f min_pt, max_pt;
                 pcl::getMinMax3D(*cloud, clusters[i], min_pt, max_pt);
 
                 ClusterMemory new_mem;
-                new_mem.centroid = current_centroid;
                 new_mem.color = generateRandomColor(); // Assign a new random color
                 new_mem.id = cluster_id_counter_++;
                 new_mem.frame_count = 1;
@@ -926,6 +953,12 @@ private:
                 new_mem.max_bounds = max_pt;
 
                 initKalmanFilter(new_mem, current_centroid, current_frame_time);
+
+                // --- MODIFICATION: Use Kalman-filtered position for centroid for new tracks ---
+                new_mem.centroid.x() = static_cast<float>(new_mem.x_k(0));
+                new_mem.centroid.y() = static_cast<float>(new_mem.x_k(1));
+                new_mem.centroid.z() = static_cast<float>(new_mem.x_k(2));
+                // --- END MODIFICATION ---
 
                 next_previous_clusters_state.push_back(new_mem);
                 RCLCPP_INFO(this->get_logger(), "New Track %d created.", new_mem.id);
@@ -939,6 +972,16 @@ private:
             if (!previous_cluster_is_assigned[j])
             {
                 ClusterMemory missed_track = previous_clusters_[j];
+
+                // For missed tracks, the current_kalman_vel_noise_q should increase to reflect growing uncertainty
+                missed_track.current_kalman_vel_noise_q = std::min(kalman_vel_noise_q_, // Capped at initial max
+                                                                    missed_track.current_kalman_vel_noise_q / kalman_vel_noise_q_decay_factor_); // Invert decay
+                
+                // --- MODIFICATION: Update missed_track.centroid to its predicted Kalman position ---
+                missed_track.centroid.x() = static_cast<float>(missed_track.x_k(0));
+                missed_track.centroid.y() = static_cast<float>(missed_track.x_k(1));
+                missed_track.centroid.z() = static_cast<float>(missed_track.x_k(2));
+                // --- END MODIFICATION ---
 
                 // If missed active track is still within its tolerance, keep it in active list
                 if (missed_track.missed_count <= n_missed_frames_)
@@ -954,9 +997,9 @@ private:
                         bbox_marker.id = missed_track.id;
                         bbox_marker.type = visualization_msgs::msg::Marker::CUBE;
                         bbox_marker.action = visualization_msgs::msg::Marker::ADD;
-                        bbox_marker.pose.position.x = missed_track.x_k(0);
-                        bbox_marker.pose.position.y = missed_track.x_k(1);
-                        bbox_marker.pose.position.z = missed_track.x_k(2);
+                        bbox_marker.pose.position.x = static_cast<float>(missed_track.x_k(0)); // Cast to float
+                        bbox_marker.pose.position.y = static_cast<float>(missed_track.x_k(1)); // Cast to float
+                        bbox_marker.pose.position.z = static_cast<float>(missed_track.x_k(2)); // Cast to float
                         // Use stored bounds for scale, as current measurement is missing
                         bbox_marker.scale.x = std::max(0.01f, missed_track.max_bounds.x() - missed_track.min_bounds.x());
                         bbox_marker.scale.y = std::max(0.01f, missed_track.max_bounds.y() - missed_track.min_bounds.y());
@@ -972,9 +1015,9 @@ private:
                         text_marker.id = missed_track.id;
                         text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
                         text_marker.action = visualization_msgs::msg::Marker::ADD;
-                        text_marker.pose.position.x = missed_track.x_k(0);
-                        text_marker.pose.position.y = missed_track.x_k(1);
-                        text_marker.pose.position.z = missed_track.x_k(2) + 0.1f;
+                        text_marker.pose.position.x = static_cast<float>(missed_track.x_k(0));
+                        text_marker.pose.position.y = static_cast<float>(missed_track.x_k(1));
+                        text_marker.pose.position.z = static_cast<float>(missed_track.x_k(2)) + 0.1f;
                         text_marker.scale.z = 0.1;
                         text_marker.color = missed_track.color;
                         text_marker.color.a = 0.5f; // Faded text
@@ -1033,6 +1076,16 @@ private:
             {
                 ClusterMemory lost_track = recently_lost_clusters_[j];
 
+                // For lost tracks, the current_kalman_vel_noise_q should also increase
+                lost_track.current_kalman_vel_noise_q = std::min(kalman_vel_noise_q_,
+                                                                 lost_track.current_kalman_vel_noise_q / kalman_vel_noise_q_decay_factor_);
+                
+                // --- MODIFICATION: Update lost_track.centroid to its predicted Kalman position ---
+                lost_track.centroid.x() = static_cast<float>(lost_track.x_k(0));
+                lost_track.centroid.y() = static_cast<float>(lost_track.x_k(1));
+                lost_track.centroid.z() = static_cast<float>(lost_track.x_k(2));
+                // --- END MODIFICATION ---
+
                 if (lost_track.missed_count <= max_lost_frames_)
                 {
                     next_recently_lost_clusters_state.push_back(lost_track); // Keep it in the lost pool
@@ -1046,9 +1099,9 @@ private:
                         bbox_marker.id = lost_track.id;
                         bbox_marker.type = visualization_msgs::msg::Marker::CUBE;
                         bbox_marker.action = visualization_msgs::msg::Marker::ADD;
-                        bbox_marker.pose.position.x = lost_track.x_k(0);
-                        bbox_marker.pose.position.y = lost_track.x_k(1);
-                        bbox_marker.pose.position.z = lost_track.x_k(2);
+                        bbox_marker.pose.position.x = static_cast<float>(lost_track.x_k(0));
+                        bbox_marker.pose.position.y = static_cast<float>(lost_track.x_k(1));
+                        bbox_marker.pose.position.z = static_cast<float>(lost_track.x_k(2));
                         bbox_marker.scale.x = std::max(0.01f, lost_track.max_bounds.x() - lost_track.min_bounds.x());
                         bbox_marker.scale.y = std::max(0.01f, lost_track.max_bounds.y() - lost_track.min_bounds.y());
                         bbox_marker.scale.z = std::max(0.01f, lost_track.max_bounds.z() - lost_track.min_bounds.z());
@@ -1063,9 +1116,9 @@ private:
                         text_marker.id = lost_track.id;
                         text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
                         text_marker.action = visualization_msgs::msg::Marker::ADD;
-                        text_marker.pose.position.x = lost_track.x_k(0);
-                        text_marker.pose.position.y = lost_track.x_k(1);
-                        text_marker.pose.position.z = lost_track.x_k(2) + 0.1f;
+                        text_marker.pose.position.x = static_cast<float>(lost_track.x_k(0));
+                        text_marker.pose.position.y = static_cast<float>(lost_track.x_k(1));
+                        text_marker.pose.position.z = static_cast<float>(lost_track.x_k(2)) + 0.1f;
                         text_marker.scale.z = 0.05; // Smaller text for lost
                         text_marker.color = lost_track.color;
                         text_marker.color.a = 0.2f; // Faded text
@@ -1120,9 +1173,11 @@ private:
         for (const auto& cluster_mem : previous_clusters_) {
             my_cluster_odom::msg::Cluster cluster_msg;
             cluster_msg.id = cluster_mem.id;
+            // --- MODIFICATION: Publish Kalman-filtered centroid in the ROS message ---
             cluster_msg.centroid.x = cluster_mem.centroid.x();
             cluster_msg.centroid.y = cluster_mem.centroid.y();
             cluster_msg.centroid.z = cluster_mem.centroid.z();
+            // --- END MODIFICATION ---
             
             cluster_msg.dimensions.x = cluster_mem.max_bounds.x() - cluster_mem.min_bounds.x();
             cluster_msg.dimensions.y = cluster_mem.max_bounds.y() - cluster_mem.min_bounds.y();
@@ -1140,13 +1195,13 @@ private:
             cluster_msg.frame_count = cluster_mem.frame_count;
             cluster_msg.missed_count = cluster_mem.missed_count;
 
-            // Copy Eigen states to fixed-size arrays for ROS message
+            // Copy Eigen states to fixed-size arrays for ROS message (ensure type consistency)
             for (int i = 0; i < 6; ++i) {
-                cluster_msg.kalman_state[i] = cluster_mem.x_k(i);
+                cluster_msg.kalman_state[i] = static_cast<float>(cluster_mem.x_k(i)); // Cast to float
             }
             for (int i = 0; i < 6; ++i) {
                 for (int j = 0; j < 6; ++j) {
-                    cluster_msg.kalman_covariance[i * 6 + j] = cluster_mem.P_k(i, j);
+                    cluster_msg.kalman_covariance[i * 6 + j] = static_cast<float>(cluster_mem.P_k(i, j)); // Cast to float
                 }
             }
             cluster_data_array_msg.clusters.push_back(cluster_msg);
@@ -1156,6 +1211,7 @@ private:
         bounding_box_viz_publisher_->publish(bounding_box_array);
         cluster_data_publisher_->publish(cluster_data_array_msg); // Publish the custom message
     }
+
 };
 
 int main(int argc, char **argv)
