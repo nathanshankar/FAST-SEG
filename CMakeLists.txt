@@ -33,38 +33,110 @@ rosidl_generate_interfaces(my_cluster_odom
   DEPENDENCIES std_msgs geometry_msgs 
 )
 
-add_executable(dbscan_clusterer_node src/dbscan_clusterer_node.cpp)
-add_executable(icp_odom_node src/icp_odom_node.cpp)
 
-install(TARGETS dbscan_clusterer_node
-  DESTINATION lib/${PROJECT_NAME}
+# add_executable(dbscan_clusterer_node src/dbscan_clusterer_node.cpp)
+# install(TARGETS dbscan_clusterer_node
+#   DESTINATION lib/${PROJECT_NAME}
+# )
+# ament_target_dependencies(dbscan_clusterer_node
+#   rclcpp sensor_msgs visualization_msgs pcl_conversions Eigen3 tf2_ros tf2_geometry_msgs tf2_eigen pcl_ros nav_msgs cv_bridge
+#   rosidl_default_runtime # Add this line
+#   # Also, add your custom message package here if it's external, but if it's in the same package, it's implicitly handled.
+# )
+# # Link against the generated message library for both executables
+# target_link_libraries(dbscan_clusterer_node
+#   my_cluster_odom__rosidl_typesupport_cpp # Link to the generated message library
+# )
+
+# Include directories
+include_directories(
+  include
+  ${PCL_INCLUDE_DIRS}
+  ${Eigen3_INCLUDE_DIR}
 )
-install(TARGETS icp_odom_node
-  DESTINATION lib/${PROJECT_NAME}
+
+# Link directories (PCL libraries)
+link_directories(
+  ${PCL_LIB_DIRS}
+)
+
+# Add our custom library for clusterer components
+add_library(${PROJECT_NAME}_core
+  src/PointCloudFilters.cpp
+  src/ClusterRefiner.cpp
+  src/ClusterTracker.cpp
+)
+
+# Target include directories for the library
+target_include_directories(${PROJECT_NAME}_core PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${PCL_INCLUDE_DIRS}
+  ${Eigen3_INCLUDE_DIR}
+)
+
+# Add ament dependencies for the core library
+ament_target_dependencies(${PROJECT_NAME}_core
+  rclcpp sensor_msgs visualization_msgs pcl_conversions Eigen3 tf2_ros tf2_geometry_msgs tf2_eigen pcl_ros nav_msgs cv_bridge
+  rosidl_default_runtime
+)
+
+# Link libraries for our core library
+target_link_libraries(${PROJECT_NAME}_core
+  ${PCL_LIBRARIES}
+  ${Eigen3_LIBRARIES}
+)
+
+# Add the main executable
+add_executable(dbscan_clusterer_node src/dbscan_clusterer_node.cpp)
+
+# Target include directories for the executable
+target_include_directories(dbscan_clusterer_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+  ${PCL_INCLUDE_DIRS}
+  ${Eigen3_INCLUDE_DIR}
 )
 
 ament_target_dependencies(dbscan_clusterer_node
-  rclcpp sensor_msgs visualization_msgs pcl_conversions Eigen3 tf2_ros tf2_geometry_msgs tf2_eigen pcl_ros nav_msgs cv_bridge
-  rosidl_default_runtime # Add this line
+  rclcpp
+  sensor_msgs
+  visualization_msgs
+  pcl_conversions
+  rosidl_default_runtime
   # Also, add your custom message package here if it's external, but if it's in the same package, it's implicitly handled.
 )
-ament_target_dependencies(icp_odom_node
-  rclcpp nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs Eigen3 sensor_msgs
-  rosidl_default_runtime # Add this line
-)
 
-# Link against the generated message library for both executables
+# Link libraries for the executable
 target_link_libraries(dbscan_clusterer_node
-  my_cluster_odom__rosidl_typesupport_cpp # Link to the generated message library
-)
-target_link_libraries(icp_odom_node
-  my_cluster_odom__rosidl_typesupport_cpp # Link to the generated message library
+  ${PROJECT_NAME}_core # Link our custom library
+  my_cluster_odom__rosidl_typesupport_cpp
+  ${PCL_LIBRARIES}
+  ${Eigen3_LIBRARIES}
 )
 
-install(PROGRAMS
-  src/disparity_cluster_node.py
-  DESTINATION lib/${PROJECT_NAME}
+# Install rules
+install(TARGETS
+  ${PROJECT_NAME}_core
+  dbscan_clusterer_node
+  LIBRARY DESTINATION lib
+  ARCHIVE DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
 )
+
+
+# add_executable(icp_odom_node src/icp_odom_node.cpp)
+# install(TARGETS icp_odom_node
+#   DESTINATION lib/${PROJECT_NAME}
+# )
+# ament_target_dependencies(icp_odom_node
+#   rclcpp nav_msgs geometry_msgs tf2 tf2_ros tf2_geometry_msgs Eigen3 sensor_msgs
+#   rosidl_default_runtime # Add this line
+# )
+# target_link_libraries(icp_odom_node
+#   my_cluster_odom__rosidl_typesupport_cpp # Link to the generated message library
+# )
+
 
 if(BUILD_TESTING)
   find_package(ament_lint_auto REQUIRED)
