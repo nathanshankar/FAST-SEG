@@ -12,7 +12,7 @@
 #include <pcl/point_types.h>
 #include <pcl/common/common.h> // For getMinMax3D
 
-#include "my_cluster_odom/Structures.hpp" // Include the common structures
+#include "my_cluster_odom/Structures.hpp" // Include the common structures, where ClusterCandidate is defined
 
 namespace dbscan_clusterer {
 
@@ -108,6 +108,33 @@ private:
      * @param current_time The current time.
      */
     void updateKalmanFilter(ClusterMemory& cluster_mem, const Eigen::Vector3f& measurement, rclcpp::Time current_time);
+
+    /**
+     * @brief Computes the Euclidean distance cost between a cluster candidate and a track's predicted position.
+     * @param cluster The detected cluster candidate.
+     * @param track The predicted track.
+     * @return The Euclidean distance.
+     */
+    double computeEuclideanCost(const dbscan_clusterer::ClusterCandidate& cluster, const ClusterMemory& track);
+
+    /**
+     * @brief Computes the combined re-identification cost between a cluster candidate and a lost track.
+     * @param cluster The detected cluster candidate.
+     * @param track The lost track.
+     * @return The weighted combined cost.
+     */
+    double computeReIDCost(const dbscan_clusterer::ClusterCandidate& cluster, const ClusterMemory& track);
+
+    /**
+     * @brief Performs Hungarian algorithm assignment given a cost matrix and a threshold.
+     * @param cost_matrix The matrix of costs (rows: detections, cols: tracks).
+     * @param threshold Costs above this value are considered infinite (no match).
+     * @return A vector of pairs (detection_idx, track_idx) for matched pairs.
+     * detection_idx refers to the row index in the cost_matrix.
+     * track_idx refers to the column index in the cost_matrix.
+     */
+    std::vector<std::pair<int, int>> performHungarianAssignment(
+        const std::vector<std::vector<double>>& cost_matrix, double threshold);
 };
 
 } // namespace dbscan_clusterer
