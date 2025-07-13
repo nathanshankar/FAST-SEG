@@ -49,7 +49,8 @@ void PointCloudFilters::applyAdaptiveXFilter(const pcl::PointCloud<pcl::PointXYZ
     
     std::nth_element(xs_copy.begin(), xs_copy.begin() + xs_copy.size() * 0.10, xs_copy.end());
     float wall_min_threshold = xs_copy[xs_copy.size() * 0.10];
-    std::nth_element(xs_copy.begin(), xs_copy.begin() + xs_copy.size() * 0.90, xs_copy.end());
+    // FIX: Changed ys_copy.size() to xs_copy.size()
+    std::nth_element(xs_copy.begin(), xs_copy.begin() + xs_copy.size() * 0.90, xs_copy.end()); 
     float wall_max_threshold = xs_copy[xs_copy.size() * 0.90];
 
     pcl::PassThrough<pcl::PointXYZ> pass_x;
@@ -106,5 +107,7 @@ void PointCloudFilters::applyVoxelGridFilter(const pcl::PointCloud<pcl::PointXYZ
         RCLCPP_WARN(logger, "Point cloud empty after voxel grid downsampling.");
     }
 }
+
+
 
 } // namespace dbscan_clusterer

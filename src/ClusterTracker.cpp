@@ -15,7 +15,9 @@ ClusterTracker::ClusterTracker(rclcpp::Logger logger,
                                double reid_dimension_weight,
                                int n_stable_frames,
                                int n_missed_frames,
-                               int max_lost_frames)
+                               int max_lost_frames,
+                               double reid_combined_threshold
+                            )
     : logger_(logger),
       kalman_pos_noise_q_(kalman_pos_noise_q),
       kalman_vel_noise_q_(kalman_vel_noise_q),
@@ -29,7 +31,8 @@ ClusterTracker::ClusterTracker(rclcpp::Logger logger,
       reid_dimension_weight_(reid_dimension_weight),
       n_stable_frames_(n_stable_frames),
       n_missed_frames_(n_missed_frames),
-      max_lost_frames_(max_lost_frames)
+      max_lost_frames_(max_lost_frames),
+      reid_combined_threshold_(reid_combined_threshold) // <--- Added this line
 {
     rand_gen_.seed(std::chrono::system_clock::now().time_since_epoch().count());
 
@@ -137,9 +140,15 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
     std::vector<ClusterMemory>& active_tracks,
     std::vector<ClusterMemory>& recently_lost_tracks)
 {
+    // Declare variables at the beginning of the function
     std::vector<ClusterMemory> next_active_tracks_state;
     std::vector<ClusterMemory> next_recently_lost_tracks_state;
     std::vector<ClusterMemory> stable_published_tracks; // Tracks that will be published as output
+
+    // These variables need to be declared before they are used in the matching loops
+    std::vector<bool> current_cluster_matched(current_detected_clusters.size(), false);
+    std::vector<bool> active_track_is_assigned(active_tracks.size(), false);
+    std::vector<std::pair<int, int>> matches_found_active;
 
     // --- Step 1: Predict positions of active tracks ---
     for (auto& prev_cluster : active_tracks) {
@@ -164,11 +173,6 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
     }
 
     // --- Step 3: Match current clusters with active tracks ---
-    std::vector<bool> current_cluster_matched(current_detected_clusters.size(), false);
-    std::vector<bool> active_track_is_assigned(active_tracks.size(), false);
-
-    std::vector<std::pair<int, int>> matches_found_active;
-
     for (size_t i = 0; i < current_detected_clusters.size(); ++i)
     {
         if (current_detected_clusters[i].empty()) continue; // Should have been filtered by refinement
@@ -243,44 +247,33 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
                                    std::abs(current_dy - lost_dy) +
                                    std::abs(current_dz - lost_dz);
 
+            double weighted_reid_dist = (position_dist * reid_position_weight_) + (dimension_diff * reid_dimension_weight_);
+
             RCLCPP_DEBUG(logger_, "Re-ID check: Current ID N/A (centroid: %.2f,%.2f,%.2f, dims: %.2f,%.2f,%.2f) vs. Lost ID %d (pred_pos: %.2f,%.2f,%.2f, stored_dims: %.2f,%.2f,%.2f)",
                         current_centroid.x(), current_centroid.y(), current_centroid.z(),
                         current_dx, current_dy, current_dz,
                         recently_lost_tracks[j].id,
                         predicted_centroid_lost.x(), predicted_centroid_lost.y(), predicted_centroid_lost.z(),
                         lost_dx, lost_dy, lost_dz);
-            RCLCPP_DEBUG(logger_, "  -> Position Dist: %.2f (Thresh: %.2f), Dimension Diff: %.2f (Thresh: %.2f)",
-                        position_dist, lost_track_position_threshold_, dimension_diff, lost_track_dimension_threshold_);
+            RCLCPP_DEBUG(logger_, "  -> Weighted Re-ID Dist: %.2f (Thresh: %.2f)",
+                        weighted_reid_dist, reid_combined_threshold_);
 
-
-            if (position_dist > lost_track_position_threshold_) {
-                RCLCPP_DEBUG(logger_, "  -> Rejected Lost ID %d: Positional distance too high.", recently_lost_tracks[j].id);
-                continue;
-            }
-            if (dimension_diff > lost_track_dimension_threshold_) {
-                RCLCPP_DEBUG(logger_, "  -> Rejected Lost ID %d: Dimension difference too high.", recently_lost_tracks[j].id);
-                continue;
-            }
-
-            double combined_score = (position_dist * reid_position_weight_) + (dimension_diff * reid_dimension_weight_); 
-
-            if (combined_score < min_combined_score) {
-                min_combined_score = combined_score;
-                best_reidentified_lost_idx = static_cast<int>(j);
+            // Refined re-identification condition
+            if (weighted_reid_dist < reid_combined_threshold_ && weighted_reid_dist < min_combined_score) // <--- Modified this line
+            {
+                min_combined_score = weighted_reid_dist; // <--- Added this line
+                best_reidentified_lost_idx = static_cast<int>(j); // <--- Added this line
             }
         }
-
-        if (best_reidentified_lost_idx != -1)
-        {
-            matches_found_reid.push_back({static_cast<int>(i), best_reidentified_lost_idx});
+        
+        // After iterating through all lost tracks, if a best match was found
+        if (best_reidentified_lost_idx != -1) { // <--- Modified this line
+            matches_found_reid.push_back({static_cast<int>(i), best_reidentified_lost_idx}); // <--- Modified this line
             current_cluster_matched[i] = true;
-            lost_track_reidentified[best_reidentified_lost_idx] = true;
-        } else {
-             RCLCPP_DEBUG(logger_, "  -> Current cluster %lu (pos: %.2f,%.2f,%.2f) failed to re-identify any lost track.",
-                          i, current_centroid.x(), current_centroid.y(), current_centroid.z());
+            lost_track_reidentified[best_reidentified_lost_idx] = true; // <--- Modified this line
+            RCLCPP_DEBUG(logger_, "Re-identified cluster (idx %lu) with lost track %d. Weighted dist: %.2f", i, recently_lost_tracks[best_reidentified_lost_idx].id, min_combined_score); // <--- Modified this line
         }
     }
-
 
     // --- Step 5: Populate 'next_active_tracks_state' and 'next_recently_lost_tracks_state' ---
 

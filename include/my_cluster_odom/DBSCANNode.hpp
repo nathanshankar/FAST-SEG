@@ -43,6 +43,8 @@ private:
     double kalman_min_vel_noise_q_;
     double kalman_vel_noise_q_decay_factor_;
     double kalman_measurement_noise_r_;
+    double voxel_leaf_size_;
+    double reid_combined_threshold_;
 
     // ROS 2 objects
     rclcpp::Subscription<sensor_msgs::msg::PointCloud2>::SharedPtr point_cloud_subscriber_;

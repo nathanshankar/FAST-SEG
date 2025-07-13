@@ -9,19 +9,24 @@ DBSCANNode::DBSCANNode() : Node("dbscan_node")
     this->declare_parameter<int>("dbscan_min_pts", 10);
     this->declare_parameter<int>("n_stable_frames", 3);
     this->declare_parameter<int>("n_missed_frames", 20);
-    this->declare_parameter<int>("max_lost_frames", 200);
+    this->declare_parameter<int>("max_lost_frames", 50);
 
     this->declare_parameter<double>("active_track_match_distance_threshold", 1.5);
     this->declare_parameter<double>("lost_track_position_threshold", 7.5);
     this->declare_parameter<double>("lost_track_dimension_threshold", 1.5);
     this->declare_parameter<double>("reid_position_weight", 1.0);
     this->declare_parameter<double>("reid_dimension_weight", 0.5);
+    this->declare_parameter<double>("reid_combined_threshold", 7.0);
+    this->declare_parameter<double>("voxel_leaf_size", 0.01);
 
     this->declare_parameter<double>("kalman_pos_noise_q", 0.1);
     this->declare_parameter<double>("kalman_vel_noise_q", 2.0);
     this->declare_parameter<double>("kalman_min_vel_noise_q", 0.05);
     this->declare_parameter<double>("kalman_vel_noise_q_decay_factor", 0.9);
     this->declare_parameter<double>("kalman_measurement_noise_r", 0.02);
+    
+
+    
 
     // Get parameters
     dbscan_eps_ = this->get_parameter("dbscan_eps").as_double();
@@ -35,6 +40,7 @@ DBSCANNode::DBSCANNode() : Node("dbscan_node")
     lost_track_dimension_threshold_ = this->get_parameter("lost_track_dimension_threshold").as_double();
     reid_position_weight_ = this->get_parameter("reid_position_weight").as_double();
     reid_dimension_weight_ = this->get_parameter("reid_dimension_weight").as_double();
+    voxel_leaf_size_ = this->get_parameter("voxel_leaf_size").as_double();
 
     kalman_pos_noise_q_ = this->get_parameter("kalman_pos_noise_q").as_double();
     kalman_vel_noise_q_ = this->get_parameter("kalman_vel_noise_q").as_double();
@@ -49,7 +55,7 @@ DBSCANNode::DBSCANNode() : Node("dbscan_node")
         kalman_pos_noise_q_, kalman_vel_noise_q_, kalman_min_vel_noise_q_, kalman_vel_noise_q_decay_factor_, kalman_measurement_noise_r_,
         active_track_match_distance_threshold_, lost_track_position_threshold_, lost_track_dimension_threshold_,
         reid_position_weight_, reid_dimension_weight_,
-        n_stable_frames_, n_missed_frames_, max_lost_frames_
+        n_stable_frames_, n_missed_frames_, max_lost_frames_, reid_combined_threshold_
     );
 
     // Subscribers and Publishers
@@ -93,7 +99,7 @@ void DBSCANNode::pointCloudCallback(const sensor_msgs::msg::PointCloud2::SharedP
     if (filtered_cloud_z->empty()) return;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr downsampled_cloud(new pcl::PointCloud<pcl::PointXYZ>());
-    PointCloudFilters::applyVoxelGridFilter(filtered_cloud_z, downsampled_cloud, 0.05f, this->get_logger());
+    PointCloudFilters::applyVoxelGridFilter(filtered_cloud_z, downsampled_cloud, voxel_leaf_size_, this->get_logger());
     if (downsampled_cloud->empty()) return;
 
     RCLCPP_INFO(this->get_logger(), "Point cloud contains %lu points after filtering and downsampling.", downsampled_cloud->size());
@@ -136,14 +142,7 @@ void DBSCANNode::publishClusterVisualizationsAndData(
 
     // A more direct way: iterate over matched active/re-identified tracks during the tracking step
     // and store their original cluster indices, then pass that info here.
-    // For simplicity of refactoring, we'll iterate through `stable_tracks` and then find their points.
-
-    // To properly visualize points, we need the original cluster indices from `detected_clusters`
-    // which were used to update the `stable_tracks`.
-    // Since `processClusters` doesn't return this mapping explicitly, we can
-    // either modify `processClusters` to return the {track_id, original_cluster_idx} mapping
-    // or re-calculate it here based on position proximity (less efficient).
-    // For this refactoring, I'll simplify the point cloud marker.
+    // For simplicity of refactoring, we'll simplify the point cloud marker.
     // We will just publish bounding boxes and text for all active/lost tracks,
     // and for stable tracks, we'll try to find the actual point cloud.
 
@@ -177,7 +176,13 @@ void DBSCANNode::publishClusterVisualizationsAndData(
     marker_array.markers.push_back(delete_all_text_marker);
 
 
-    // Publish markers for stable, active tracks (full visibility, point clouds)
+    // Create a set of stable track IDs for quick lookup
+    std::set<int> stable_track_ids;
+    for(const auto& track : stable_tracks) {
+        stable_track_ids.insert(track.id);
+    }
+
+    // Publish markers for stable tracks (full visibility, point clouds)
     for (const auto& cluster_mem : stable_tracks) {
         // Find the original detected cluster for point visualization based on proximity to Kalman centroid
         int original_cluster_idx = -1;
@@ -284,17 +289,61 @@ void DBSCANNode::publishClusterVisualizationsAndData(
         cluster_data_array_msg.clusters.push_back(cluster_msg);
     }
 
+    // Publish markers for active tracks that are not yet stable (faded visibility)
+    for (const auto& active_track : active_tracks_current_state) {
+        if (stable_track_ids.count(active_track.id) == 0) { // If not already published as stable
+            visualization_msgs::msg::Marker bbox_marker;
+            bbox_marker.header.frame_id = frame_id;
+            bbox_marker.header.stamp = current_frame_time;
+            bbox_marker.ns = "bounding_boxes";
+            bbox_marker.id = active_track.id;
+            bbox_marker.type = visualization_msgs::msg::Marker::CUBE;
+            bbox_marker.action = visualization_msgs::msg::Marker::ADD;
+            bbox_marker.pose.position.x = active_track.centroid.x();
+            bbox_marker.pose.position.y = active_track.centroid.y();
+            bbox_marker.pose.position.z = active_track.centroid.z();
+            bbox_marker.scale.x = std::max(0.01f, active_track.max_bounds.x() - active_track.min_bounds.x());
+            bbox_marker.scale.y = std::max(0.01f, active_track.max_bounds.y() - active_track.min_bounds.y());
+            bbox_marker.scale.z = std::max(0.01f, active_track.max_bounds.z() - active_track.min_bounds.z());
+            bbox_marker.color = active_track.color;
+            bbox_marker.color.a = 0.3f; // Slightly faded for active but not stable
+            bounding_box_array.markers.push_back(bbox_marker);
+
+            visualization_msgs::msg::Marker text_marker;
+            text_marker.header.frame_id = frame_id;
+            text_marker.header.stamp = current_frame_time;
+            text_marker.ns = "cluster_ids";
+            text_marker.id = active_track.id;
+            text_marker.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+            text_marker.action = visualization_msgs::msg::Marker::ADD;
+            text_marker.pose.position.x = active_track.centroid.x();
+            text_marker.pose.position.y = active_track.centroid.y();
+            text_marker.pose.position.z = active_track.centroid.z() + 0.1f;
+            text_marker.scale.z = 0.07; // Slightly smaller than stable text
+            text_marker.color = active_track.color;
+            text_marker.color.a = 0.7f; // Faded text
+            text_marker.text = "ID: " + std::to_string(active_track.id) +
+                               "\nF: " + std::to_string(active_track.frame_count);
+            marker_array.markers.push_back(text_marker);
+        }
+    }
+
+
     // Publish very faded markers for recently lost tracks (only bounding box and text)
     // We iterate over `recently_lost_tracks_current_state` (the actual full list)
     // and filter for those that were NOT re-identified, or are still in the lost pool.
     // This is to avoid duplicating stable_tracks.
-    std::set<int> stable_track_ids;
+    // Also ensure not to duplicate active tracks that are not stable.
+    std::set<int> active_and_stable_track_ids;
     for(const auto& track : stable_tracks) {
-        stable_track_ids.insert(track.id);
+        active_and_stable_track_ids.insert(track.id);
+    }
+    for(const auto& track : active_tracks_current_state) {
+        active_and_stable_track_ids.insert(track.id);
     }
 
     for (const auto& lost_track : recently_lost_tracks_current_state) {
-        if (stable_track_ids.count(lost_track.id) == 0 && lost_track.frame_count >= n_stable_frames_) { // If it's not currently stable, and was stable enough to be visualized
+        if (active_and_stable_track_ids.count(lost_track.id) == 0 && lost_track.frame_count >= n_stable_frames_) { // If it's not currently stable or active, and was stable enough to be visualized
             visualization_msgs::msg::Marker bbox_marker;
             bbox_marker.header.frame_id = frame_id;
             bbox_marker.header.stamp = current_frame_time;

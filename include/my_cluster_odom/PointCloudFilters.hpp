@@ -52,6 +52,7 @@ public:
     static void applyVoxelGridFilter(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_in,
                                      pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud_out,
                                      float leaf_size, rclcpp::Logger logger);
+                                     
 };
 
 } // namespace dbscan_clusterer

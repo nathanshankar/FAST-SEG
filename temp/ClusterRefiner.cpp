@@ -7,6 +7,7 @@
 #include <queue> // For std::queue in DBSCAN
 #include <vector> // Required for std::vector
 
+
 namespace dbscan_clusterer {
 
 ClusterRefiner::ClusterRefiner(rclcpp::Logger logger) : logger_(logger) {}
@@ -97,9 +98,6 @@ std::vector<std::vector<int>> ClusterRefiner::refineClusters(
     const float MAX_DENSITY_FOR_SMALL_CLUSTER = 1000.0f;
     const float MIN_VOLUME_THRESHOLD = 0.01f;
     const float MIN_SIDE_LENGTH_THRESHOLD = 0.03f;
-    // New constants for "smart" wall filtering based on geometric properties
-    const float THINNESS_RATIO_THRESHOLD = 0.10f; // Defines how thin a cluster needs to be to be considered wall-like
-    const float MIN_LARGE_DIMENSION_FOR_WALL = 0.5f; // Minimum length for the two largest dimensions of a wall
 
     for (const auto& cluster : clusters)
     {
@@ -131,34 +129,6 @@ std::vector<std::vector<int>> ClusterRefiner::refineClusters(
         if (cluster.size() < MIN_CLUSTER_POINTS_THRESHOLD * 2 && density > MAX_DENSITY_FOR_SMALL_CLUSTER)
             continue;
 
-        // --- NEW SMART WALL FILTERING LOGIC ---
-        float min_dim = std::min({dx, dy, dz});
-        float max_dim = std::max({dx, dy, dz});
-
-        bool is_wall_candidate = false;
-        if (max_dim > 0) { // Avoid division by zero
-            // Check if the cluster is thin in one dimension
-            if (min_dim / max_dim < THINNESS_RATIO_THRESHOLD) {
-                // Get the two largest dimensions
-                std::vector<float> dims = {dx, dy, dz};
-                std::sort(dims.begin(), dims.end()); 
-                float large_dim1 = dims[1]; // Second largest dimension
-                float large_dim2 = dims[2]; // Largest dimension
-
-                // Check if the two largest dimensions are sufficiently large (characteristic of a wall)
-                if (large_dim1 > MIN_LARGE_DIMENSION_FOR_WALL && large_dim2 > MIN_LARGE_DIMENSION_FOR_WALL) {
-                    is_wall_candidate = true;
-                }
-            }
-        }
-        
-        if (is_wall_candidate) {
-            // If the cluster is identified as a wall-like object, discard it
-            continue; 
-        }
-        // --- END NEW SMART WALL FILTERING LOGIC ---
-
-        // Original density-based sub-clustering decision (as provided in your scratch code)
         if (density < 50.0f && recursion_level < max_recursion)
         {
             pcl::PointCloud<pcl::PointXYZ>::Ptr sub_cloud(new pcl::PointCloud<pcl::PointXYZ>());

@@ -43,6 +43,9 @@ public:
         double dbscan_eps, int dbscan_min_pts,
         int recursion_level = 0, int max_recursion = 1);
 
+    Eigen::Vector3f getClusterCentroid(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const std::vector<int>& indices);
+    
+
 private:
     rclcpp::Logger logger_;
 };

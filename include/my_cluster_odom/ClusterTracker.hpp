@@ -31,7 +31,8 @@ public:
                    double reid_dimension_weight,
                    int n_stable_frames,
                    int n_missed_frames,
-                   int max_lost_frames);
+                   int max_lost_frames,
+                   double reid_combined_threshold);
 
     /**
      * @brief Processes a new set of detected clusters, performing tracking and updating track states.
@@ -75,6 +76,8 @@ private:
     int n_stable_frames_;
     int n_missed_frames_;
     int max_lost_frames_;
+
+    double reid_combined_threshold_;
 
     std::default_random_engine rand_gen_;
     int cluster_id_counter_ = 1; // Starts from 1
