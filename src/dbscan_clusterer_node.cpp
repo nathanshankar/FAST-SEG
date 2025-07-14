@@ -24,7 +24,6 @@ DBSCANNode::DBSCANNode() : Node("dbscan_node")
     this->declare_parameter<double>("kalman_min_vel_noise_q", 0.05);
     this->declare_parameter<double>("kalman_vel_noise_q_decay_factor", 0.9);
     this->declare_parameter<double>("kalman_measurement_noise_r", 0.02);
-    
 
     
 
