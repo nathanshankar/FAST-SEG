@@ -39,6 +39,7 @@ DBSCANNode::DBSCANNode() : Node("dbscan_node")
     lost_track_dimension_threshold_ = this->get_parameter("lost_track_dimension_threshold").as_double();
     reid_position_weight_ = this->get_parameter("reid_position_weight").as_double();
     reid_dimension_weight_ = this->get_parameter("reid_dimension_weight").as_double();
+    reid_combined_threshold_ = this->get_parameter("reid_combined_threshold").as_double();
     voxel_leaf_size_ = this->get_parameter("voxel_leaf_size").as_double();
 
     kalman_pos_noise_q_ = this->get_parameter("kalman_pos_noise_q").as_double();

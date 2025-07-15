@@ -129,7 +129,7 @@ std::vector<std::vector<int>> ClusterRefiner::refineClusters(
         if (cluster.size() < MIN_CLUSTER_POINTS_THRESHOLD * 2 && density > MAX_DENSITY_FOR_SMALL_CLUSTER)
             continue;
 
-        if (density < 50.0f && recursion_level < max_recursion)
+        if ((density < 50.0f || cluster.size() > 400) && recursion_level < max_recursion) 
         {
             pcl::PointCloud<pcl::PointXYZ>::Ptr sub_cloud(new pcl::PointCloud<pcl::PointXYZ>());
             pcl::copyPointCloud(*cloud, cluster, *sub_cloud); 
