@@ -11,6 +11,9 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 #include <pcl/common/common.h> // For getMinMax3D
+#include <map>
+#include <set>
+
 
 #include "my_cluster_odom/Structures.hpp" // Include the common structures
 
@@ -52,7 +55,7 @@ public:
 
     // Public for access by DBSCANNode for initialization/reset if needed
     Eigen::Vector3f computeCentroid(const pcl::PointCloud<pcl::PointXYZ>::Ptr& cloud, const std::vector<int>& indices);
-    std_msgs::msg::ColorRGBA generateRandomColor();
+    std_msgs::msg::ColorRGBA generateColorFromId(int id);
     
     // For initializing the first Cluster ID
     int getNextClusterId() { return cluster_id_counter_++; }

@@ -1,6 +1,7 @@
 #include "my_cluster_odom/ClusterTracker.hpp"
 
 
+
 namespace dbscan_clusterer {
 
 ClusterTracker::ClusterTracker(rclcpp::Logger logger,
@@ -54,7 +55,7 @@ void ClusterTracker::initKalmanFilter(ClusterMemory& cluster_mem, const Eigen::V
     cluster_mem.P_k = Eigen::MatrixXd::Identity(6, 6);
     cluster_mem.P_k.block<3,3>(0,0) = Eigen::Matrix3d::Identity() * 0.1; // Initial position uncertainty
     cluster_mem.P_k.block<3,3>(3,3) = Eigen::Matrix3d::Identity() * 10.0; // Initial velocity uncertainty (high, because we don't know it)
-
+    cluster_mem.color = generateColorFromId(cluster_mem.id);
     cluster_mem.last_update_time = current_time;
     cluster_mem.current_kalman_vel_noise_q = kalman_vel_noise_q_; // Initialize with max noise
 }
@@ -114,22 +115,21 @@ Eigen::Vector3f ClusterTracker::computeCentroid(const pcl::PointCloud<pcl::Point
     return centroid;
 }
 
-std_msgs::msg::ColorRGBA ClusterTracker::generateRandomColor()
-{
+std_msgs::msg::ColorRGBA ClusterTracker::generateColorFromId(int id) {
     std_msgs::msg::ColorRGBA color;
-    std::uniform_real_distribution<> dist(0.0, 1.0);
-    color.r = dist(rand_gen_);
-    color.g = dist(rand_gen_);
-    color.b = dist(rand_gen_);
-    if (color.r + color.g + color.b < 0.8) {
-        float sum_rgb = color.r + color.g + color.b;
-        if (sum_rgb < 1e-6f) sum_rgb = 1e-6f;
-        float scale_factor = 0.8f / sum_rgb;
-        color.r *= scale_factor;
-        color.g *= scale_factor;
-        color.b *= scale_factor;
-    }
-    color.a = 1.0f;
+
+    // Use a simple hash-like function to map ID to RGB values
+    // This provides a deterministic color for each ID.
+    // You can experiment with different prime numbers or bit shifts for better distribution.
+    unsigned int r = (id * 123 + 45) % 256;
+    unsigned int g = (id * 67 + 89) % 256;
+    unsigned int b = (id * 91 + 12) % 256;
+
+    color.r = static_cast<float>(r) / 255.0f;
+    color.g = static_cast<float>(g) / 255.0f;
+    color.b = static_cast<float>(b) / 255.0f;
+    color.a = 0.5f; // Maintain opacity
+
     return color;
 }
 
@@ -141,17 +141,12 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
     std::vector<ClusterMemory>& active_tracks,
     std::vector<ClusterMemory>& recently_lost_tracks)
 {
-    // Declare variables at the beginning of the function
+    // These vectors will store the state for the next frame
     std::vector<ClusterMemory> next_active_tracks_state;
     std::vector<ClusterMemory> next_recently_lost_tracks_state;
-    std::vector<ClusterMemory> stable_published_tracks; // Tracks that will be published as output
+    std::vector<ClusterMemory> stable_published_tracks;
 
-    // These variables need to be declared before they are used in the matching loops
-    std::vector<bool> current_cluster_matched(current_detected_clusters.size(), false);
-    std::vector<bool> active_track_is_assigned(active_tracks.size(), false);
-    std::vector<std::pair<int, int>> matches_found_active;
-
-    // --- Step 1: Predict positions of active tracks ---
+    // --- Step 1: Predict positions of active and recently lost tracks ---
     for (auto& prev_cluster : active_tracks) {
         prev_cluster.missed_count++;
         double dt = (current_frame_time - prev_cluster.last_update_time).seconds();
@@ -161,8 +156,6 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
         }
         predictKalmanFilter(prev_cluster, dt);
     }
-
-    // --- Step 2: Predict positions for recently lost tracks ---
     for (auto& lost_cluster : recently_lost_tracks) {
         lost_cluster.missed_count++;
         double dt = (current_frame_time - lost_cluster.last_update_time).seconds();
@@ -173,50 +166,82 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
         predictKalmanFilter(lost_cluster, dt);
     }
 
-    // --- Step 3: Match current clusters with active tracks ---
-    for (size_t i = 0; i < current_detected_clusters.size(); ++i)
-    {
-        if (current_detected_clusters[i].empty()) continue; // Should have been filtered by refinement
-
+    // --- Step 2: Match current clusters with active tracks ---
+    // The core fix: we now find ALL potential matches for each active track, not just the best one.
+    std::map<int, std::vector<int>> track_to_cluster_matches; // map from active_track_idx to list of current_cluster_indices
+    std::vector<bool> current_cluster_is_assigned(current_detected_clusters.size(), false);
+    std::vector<bool> active_track_is_assigned(active_tracks.size(), false);
+    
+    // First, find all potential matches and their distances
+    for (size_t i = 0; i < current_detected_clusters.size(); ++i) {
+        if (current_detected_clusters[i].empty()) continue;
         Eigen::Vector3f current_centroid = computeCentroid(cloud, current_detected_clusters[i]);
-
-        int best_matched_active_idx = -1;
-        double min_dist = std::numeric_limits<double>::max();
-
-        for (size_t j = 0; j < active_tracks.size(); ++j)
-        {
-            if (active_track_is_assigned[j]) {
-                continue;
-            }
-
+        
+        for (size_t j = 0; j < active_tracks.size(); ++j) {
             Eigen::Vector3f predicted_centroid_active(static_cast<float>(active_tracks[j].x_k(0)),
                                                       static_cast<float>(active_tracks[j].x_k(1)),
                                                       static_cast<float>(active_tracks[j].x_k(2)));
-
             double dist = (current_centroid - predicted_centroid_active).norm();
-
-            if (dist < min_dist && dist < active_track_match_distance_threshold_)
-            {
-                min_dist = dist;
-                best_matched_active_idx = static_cast<int>(j);
+            
+            if (dist < active_track_match_distance_threshold_) {
+                track_to_cluster_matches[j].push_back(i);
             }
-        }
-
-        if (best_matched_active_idx != -1)
-        {
-            matches_found_active.push_back({static_cast<int>(i), best_matched_active_idx});
-            current_cluster_matched[i] = true;
-            active_track_is_assigned[best_matched_active_idx] = true;
         }
     }
 
-    // --- Step 4: Re-identify unmatched current clusters with recently_lost_tracks_ ---
+    // Now, process the matches. This handles the one-to-one and one-to-many cases.
+    for (auto const& [active_track_idx, current_cluster_indices] : track_to_cluster_matches) {
+        if (current_cluster_indices.empty()) {
+            continue; // Should not happen with the way the map is built, but for safety
+        }
+
+        ClusterMemory updated_mem = active_tracks[active_track_idx];
+        active_track_is_assigned[active_track_idx] = true;
+
+        // If multiple clusters match a single track, we merge them
+        pcl::PointCloud<pcl::PointXYZ>::Ptr merged_cloud(new pcl::PointCloud<pcl::PointXYZ>());
+        for(int cluster_idx : current_cluster_indices) {
+            for(int point_idx : current_detected_clusters[cluster_idx]) {
+                merged_cloud->points.push_back(cloud->points[point_idx]);
+            }
+            current_cluster_is_assigned[cluster_idx] = true;
+        }
+
+        if (merged_cloud->points.empty()) continue;
+        
+        // Compute new centroid and bounds for the merged cluster
+        std::vector<int> merged_indices(merged_cloud->points.size());
+        std::iota(merged_indices.begin(), merged_indices.end(), 0);
+        Eigen::Vector3f merged_centroid = computeCentroid(merged_cloud, merged_indices);
+        Eigen::Vector4f min_pt, max_pt;
+        pcl::getMinMax3D(*merged_cloud, min_pt, max_pt);
+        
+        updated_mem.min_bounds = min_pt;
+        updated_mem.max_bounds = max_pt;
+        updated_mem.frame_count++;
+        updated_mem.missed_count = 0;
+        
+        // Update Kalman filter with the merged cluster's centroid
+        updateKalmanFilter(updated_mem, merged_centroid, current_frame_time);
+        
+        updated_mem.centroid.x() = static_cast<float>(updated_mem.x_k(0));
+        updated_mem.centroid.y() = static_cast<float>(updated_mem.x_k(1));
+        updated_mem.centroid.z() = static_cast<float>(updated_mem.x_k(2));
+        
+        next_active_tracks_state.push_back(updated_mem);
+        if (updated_mem.frame_count >= n_stable_frames_) {
+            stable_published_tracks.push_back(updated_mem);
+        }
+    }
+
+
+    // --- Step 3: Re-identify unmatched current clusters with recently_lost_tracks_ ---
     std::vector<bool> lost_track_reidentified(recently_lost_tracks.size(), false);
-    std::vector<std::pair<int, int>> matches_found_reid;
 
     for (size_t i = 0; i < current_detected_clusters.size(); ++i)
     {
-        if (current_cluster_matched[i] || current_detected_clusters[i].empty()) continue;
+        // Only consider clusters that haven't already been assigned to an active track
+        if (current_cluster_is_assigned[i] || current_detected_clusters[i].empty()) continue;
 
         Eigen::Vector3f current_centroid = computeCentroid(cloud, current_detected_clusters[i]);
         Eigen::Vector4f min_pt_current, max_pt_current;
@@ -250,109 +275,62 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
 
             double weighted_reid_dist = (position_dist * reid_position_weight_) + (dimension_diff * reid_dimension_weight_);
 
-            RCLCPP_DEBUG(logger_, "Re-ID check: Current ID N/A (centroid: %.2f,%.2f,%.2f, dims: %.2f,%.2f,%.2f) vs. Lost ID %d (pred_pos: %.2f,%.2f,%.2f, stored_dims: %.2f,%.2f,%.2f)",
-                        current_centroid.x(), current_centroid.y(), current_centroid.z(),
-                        current_dx, current_dy, current_dz,
-                        recently_lost_tracks[j].id,
-                        predicted_centroid_lost.x(), predicted_centroid_lost.y(), predicted_centroid_lost.z(),
-                        lost_dx, lost_dy, lost_dz);
-            RCLCPP_DEBUG(logger_, "  -> Weighted Re-ID Dist: %.2f (Thresh: %.2f)",
-                        weighted_reid_dist, reid_combined_threshold_);
-
-            // Refined re-identification condition
-            if (weighted_reid_dist < reid_combined_threshold_ && weighted_reid_dist < min_combined_score) // <--- Modified this line
+            if (weighted_reid_dist < reid_combined_threshold_ && weighted_reid_dist < min_combined_score)
             {
-                min_combined_score = weighted_reid_dist; // <--- Added this line
-                best_reidentified_lost_idx = static_cast<int>(j); // <--- Added this line
+                min_combined_score = weighted_reid_dist;
+                best_reidentified_lost_idx = static_cast<int>(j);
             }
         }
         
-        // After iterating through all lost tracks, if a best match was found
-        if (best_reidentified_lost_idx != -1) { // <--- Modified this line
-            matches_found_reid.push_back({static_cast<int>(i), best_reidentified_lost_idx}); // <--- Modified this line
-            current_cluster_matched[i] = true;
-            lost_track_reidentified[best_reidentified_lost_idx] = true; // <--- Modified this line
-            RCLCPP_DEBUG(logger_, "Re-identified cluster (idx %lu) with lost track %d. Weighted dist: %.2f", i, recently_lost_tracks[best_reidentified_lost_idx].id, min_combined_score); // <--- Modified this line
+        if (best_reidentified_lost_idx != -1) {
+            int lost_idx = best_reidentified_lost_idx;
+
+            Eigen::Vector3f current_centroid = computeCentroid(cloud, current_detected_clusters[i]);
+            Eigen::Vector4f min_pt, max_pt;
+            pcl::getMinMax3D(*cloud, current_detected_clusters[i], min_pt, max_pt);
+
+            ClusterMemory reidentified_mem = recently_lost_tracks[lost_idx];
+            reidentified_mem.min_bounds = min_pt;
+            reidentified_mem.max_bounds = max_pt;
+            reidentified_mem.frame_count++;
+            reidentified_mem.missed_count = 0;
+
+            updateKalmanFilter(reidentified_mem, current_centroid, current_frame_time);
+            
+            reidentified_mem.centroid.x() = static_cast<float>(reidentified_mem.x_k(0));
+            reidentified_mem.centroid.y() = static_cast<float>(reidentified_mem.x_k(1));
+            reidentified_mem.centroid.z() = static_cast<float>(reidentified_mem.x_k(2));
+
+            next_active_tracks_state.push_back(reidentified_mem);
+            lost_track_reidentified[lost_idx] = true;
+            current_cluster_is_assigned[i] = true; // Mark as assigned
+            RCLCPP_INFO(logger_, "Track %d RE-IDENTIFIED (current frame count: %d).", reidentified_mem.id, reidentified_mem.frame_count);
+
+            if (reidentified_mem.frame_count >= n_stable_frames_) {
+                stable_published_tracks.push_back(reidentified_mem);
+            }
         }
     }
 
-    // --- Step 5: Populate 'next_active_tracks_state' and 'next_recently_lost_tracks_state' ---
 
-    // Process matched active clusters
-    for (const auto& match : matches_found_active)
-    {
-        int current_idx = match.first;
-        int active_idx = match.second;
-
-        Eigen::Vector3f current_centroid = computeCentroid(cloud, current_detected_clusters[current_idx]);
-        Eigen::Vector4f min_pt, max_pt;
-        pcl::getMinMax3D(*cloud, current_detected_clusters[current_idx], min_pt, max_pt);
-
-        ClusterMemory updated_mem = active_tracks[active_idx];
-        updated_mem.min_bounds = min_pt;
-        updated_mem.max_bounds = max_pt;
-        updated_mem.frame_count++;
-        updated_mem.missed_count = 0;
-
-        updateKalmanFilter(updated_mem, current_centroid, current_frame_time);
-        
-        updated_mem.centroid.x() = static_cast<float>(updated_mem.x_k(0));
-        updated_mem.centroid.y() = static_cast<float>(updated_mem.x_k(1));
-        updated_mem.centroid.z() = static_cast<float>(updated_mem.x_k(2));
-
-        next_active_tracks_state.push_back(updated_mem);
-
-        if (updated_mem.frame_count >= n_stable_frames_) {
-            stable_published_tracks.push_back(updated_mem);
-        }
-    }
-
-    // Process re-identified lost clusters
-    for (const auto& match : matches_found_reid)
-    {
-        int current_idx = match.first;
-        int lost_idx = match.second;
-
-        Eigen::Vector3f current_centroid = computeCentroid(cloud, current_detected_clusters[current_idx]);
-        Eigen::Vector4f min_pt, max_pt;
-        pcl::getMinMax3D(*cloud, current_detected_clusters[current_idx], min_pt, max_pt);
-
-        ClusterMemory reidentified_mem = recently_lost_tracks[lost_idx];
-        reidentified_mem.min_bounds = min_pt;
-        reidentified_mem.max_bounds = max_pt;
-        reidentified_mem.frame_count++;
-        reidentified_mem.missed_count = 0;
-
-        updateKalmanFilter(reidentified_mem, current_centroid, current_frame_time);
-        
-        reidentified_mem.centroid.x() = static_cast<float>(reidentified_mem.x_k(0));
-        reidentified_mem.centroid.y() = static_cast<float>(reidentified_mem.x_k(1));
-        reidentified_mem.centroid.z() = static_cast<float>(reidentified_mem.x_k(2));
-
-        next_active_tracks_state.push_back(reidentified_mem);
-        RCLCPP_INFO(logger_, "Track %d RE-IDENTIFIED (current frame count: %d).", reidentified_mem.id, reidentified_mem.frame_count);
-
-        if (reidentified_mem.frame_count >= n_stable_frames_) {
-            stable_published_tracks.push_back(reidentified_mem);
-        }
-    }
-
-    // Process new clusters
+    // --- Step 4: Process new clusters that were not matched or re-identified ---
     for (size_t i = 0; i < current_detected_clusters.size(); ++i)
     {
-        if (!current_cluster_matched[i])
+        if (!current_cluster_is_assigned[i])
         {
             Eigen::Vector3f current_centroid = computeCentroid(cloud, current_detected_clusters[i]);
             Eigen::Vector4f min_pt, max_pt;
             pcl::getMinMax3D(*cloud, current_detected_clusters[i], min_pt, max_pt);
 
             ClusterMemory new_mem;
-            new_mem.color = generateRandomColor();
             new_mem.id = getNextClusterId();
             new_mem.frame_count = 1;
             new_mem.missed_count = 0;
             new_mem.min_bounds = min_pt;
             new_mem.max_bounds = max_pt;
+
+            RCLCPP_INFO(logger_, "NEW ID ASSIGNED: Cluster at [%.2f, %.2f, %.2f] received ID %d",
+                        current_centroid.x(), current_centroid.y(), current_centroid.z(), new_mem.id);
 
             initKalmanFilter(new_mem, current_centroid, current_frame_time);
 
@@ -365,7 +343,7 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
         }
     }
 
-    // --- Step 6: Handle tracks that were NOT matched in this frame ---
+    // --- Step 5: Handle tracks that were NOT matched in this frame ---
     // Active tracks that were not matched
     for (size_t j = 0; j < active_tracks.size(); ++j)
     {
@@ -383,9 +361,8 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
             if (missed_track.missed_count <= n_missed_frames_)
             {
                 next_active_tracks_state.push_back(missed_track);
-                // If stable, we would mark it for publishing with faded markers by the node
                 if (missed_track.frame_count >= n_stable_frames_) {
-                    stable_published_tracks.push_back(missed_track); // Still publish its info even if missed
+                    stable_published_tracks.push_back(missed_track);
                 }
             } else {
                 next_recently_lost_tracks_state.push_back(missed_track);
@@ -412,7 +389,7 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
             {
                 next_recently_lost_tracks_state.push_back(lost_track);
                 if (lost_track.frame_count >= n_stable_frames_) {
-                    stable_published_tracks.push_back(lost_track); // Still publish its info
+                    stable_published_tracks.push_back(lost_track);
                 }
             } else {
                 RCLCPP_INFO(logger_, "Track %d permanently forgotten (missed %d frames).", lost_track.id, lost_track.missed_count);
@@ -425,5 +402,4 @@ std::vector<ClusterMemory> ClusterTracker::processClusters(
 
     return stable_published_tracks;
 }
-
 } // namespace dbscan_clusterer
