@@ -2,6 +2,11 @@
 
 `FAST-SEG` is a ROS 2 package centered around the `my_cluster_odom` package, designed for efficient point cloud segmentation using DBSCAN and robust cluster tracking with Kalman Filters. It provides a full pipeline from raw point cloud filtering to stable, tracked object clusters.
 
+
+
+https://github.com/user-attachments/assets/c650a529-6b12-4f3f-8a95-87a96c517003
+
+
 ## Features
 
 - **Adaptive Point Cloud Filtering**: Automatically adjusts filtering thresholds for X, Y, and Z axes to isolate objects of interest (e.g., removing ground, ceiling, or distant walls).
